@@ -14,7 +14,7 @@ from db import (
 
 API_KEY = os.getenv("INTERNAL_STARS_API_KEY")
 API_HOST = os.getenv("INTERNAL_STARS_API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("INTERNAL_STARS_API_PORT", "8080"))
+API_PORT = int(os.getenv("INTERNAL_STARS_API_PORT", "9000"))
 
 app = FastAPI()
 
