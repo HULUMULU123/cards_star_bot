@@ -1,0 +1,7 @@
+pyTelegramBotAPI
+python-dotenv
+pandas
+openpyxl
+requests
+fastapi
+uvicorn
