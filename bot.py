@@ -381,7 +381,7 @@ def buy_internal_stars_menu(call: CallbackQuery):
         message_id=call.message.message_id,
         text="⭐ Покупка внутренних звезд (1 внутренняя ⭐ = 1 Telegram ⭐)\n\n"
              "💳 Оплата списывается Telegram Stars\n"
-             f"🏦 В админке: {pool} ⭐",
+             ,
         reply_markup=buy_internal_stars_quantity_keyboard()
     )
 
@@ -1242,7 +1242,7 @@ def handle_successful_payment(message: Message):
         "✅ Оплата Telegram Stars успешна!\n\n"
         f"⭐ Получено: {stars}\n"
         f"⭐ Ваши внутренние звезды: {user_data_new.get('internal_stars', 0)}\n"
-        # f"🏦 В админке: {pool_new} ⭐",
+       ,
         reply_markup=back_to_main_keyboard()
     )
 
