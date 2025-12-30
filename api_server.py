@@ -4,12 +4,15 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 import uvicorn
 
+from bot import bot
+from config import ADMIN_ID
 from db import (
     get_internal_stars,
     get_internal_stars_pool,
     update_internal_stars,
     update_internal_stars_pool
 )
+from keyboards import back_to_main_keyboard
 
 
 API_KEY = os.getenv("INTERNAL_STARS_API_KEY")
@@ -28,6 +31,13 @@ def require_api_key(x_api_key: str = Header(None)):
 
 class AmountRequest(BaseModel):
     amount: int
+
+
+class WithdrawalRequest(BaseModel):
+    user_id: int
+    amount: int
+    username: str | None = None
+    comment: str | None = None
 
 
 @app.get("/internal-stars/balance")
@@ -97,6 +107,31 @@ def debit_internal_stars(body: AmountRequest, _: None = Depends(require_api_key)
     if not ok:
         raise HTTPException(status_code=400, detail="insufficient_balance")
     return {"balance": get_internal_stars_pool()}
+
+
+@app.post("/withdrawals/notify")
+def notify_withdrawal(body: WithdrawalRequest, _: None = Depends(require_api_key)):
+    if body.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount_must_be_positive")
+    if not ADMIN_ID:
+        raise HTTPException(status_code=500, detail="admin_id_not_configured")
+
+    username_text = f"@{body.username}" if body.username else "not_set"
+    message = (
+        "*Заявка на вывод, проверьте админнку*\n\n"
+        f"Пользователь: {username_text}\n"
+        f"Количество: {body.amount}"
+    )
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            message,
+            parse_mode="Markdown",
+            reply_markup=back_to_main_keyboard()
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"send_failed:{e}")
+    return {"status": "ok"}
 
 
 def run_api_server():
