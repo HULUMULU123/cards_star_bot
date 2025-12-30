@@ -1,4 +1,5 @@
 import sqlite3
+import config
 from config import DB_NAME, logger
 
 
@@ -303,6 +304,20 @@ def set_setting(key, value):
     )
     conn.commit()
     conn.close()
+
+
+def get_star_price():
+    """Получает текущую цену Telegram Stars."""
+    value = get_setting('star_price', None)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(config.STAR_PRICE)
+
+
+def set_star_price(value):
+    """Сохраняет цену Telegram Stars."""
+    set_setting('star_price', float(value))
 
 
 def get_ton_rate():

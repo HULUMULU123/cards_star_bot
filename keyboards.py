@@ -7,7 +7,7 @@ from config import *
 from db import *
 
 
-def main_menu_keyboard():
+def main_menu_keyboard(user_id=None):
     keyboard = InlineKeyboardMarkup()
     keyboard.row(
         InlineKeyboardButton("⭐ Купить звезды", callback_data='buy_stars'),
@@ -24,6 +24,8 @@ def main_menu_keyboard():
     keyboard.row(
         InlineKeyboardButton("🧪 +50 внутренних ⭐ (тест)", callback_data='grant_internal_50')
     )
+    if user_id and str(user_id) == str(config.ADMIN_ID):
+        keyboard.row(InlineKeyboardButton("⚙️ Админка", callback_data='admin_menu'))
     return keyboard
 
 
@@ -41,7 +43,7 @@ def buy_stars_quantity_keyboard(user_data):
     keyboard = InlineKeyboardMarkup()
 
     # Получаем актуальную цену из БД
-    star_price = config.STAR_PRICE
+    star_price = get_star_price()
 
     options = [
         (50, f"50 звезд - {star_price * 50:.2f} руб"),
@@ -53,6 +55,7 @@ def buy_stars_quantity_keyboard(user_data):
     for stars, text in options:
         keyboard.row(InlineKeyboardButton(text, callback_data=f'buy_{stars}'))
 
+    keyboard.row(InlineKeyboardButton("✍️ Другое количество", callback_data='buy_custom'))
     keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='main_menu'))
     return keyboard
 
@@ -107,6 +110,7 @@ def buy_internal_stars_quantity_keyboard():
     for stars, text in options:
         keyboard.row(InlineKeyboardButton(text, callback_data=f'buy_internal_{stars}'))
 
+    keyboard.row(InlineKeyboardButton("✍️ Другое количество", callback_data='buy_internal_custom'))
     keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='main_menu'))
     return keyboard
 

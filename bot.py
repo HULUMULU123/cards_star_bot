@@ -18,7 +18,7 @@ import os
 
 
 try:
-    from config import STAR_PRICE, MAIN_MENU_IMAGE, WELCOME_MES, logger, REFERRAL_REWARD, \
+    from config import MAIN_MENU_IMAGE, WELCOME_MES, logger, REFERRAL_REWARD, \
     ADMIN_ID, DB_NAME
     from db import (
         init_db, get_user, create_user, update_balance, add_transaction,
@@ -27,7 +27,7 @@ try:
         get_setting, set_setting, get_referral_count, get_ton_rate_updated_at,
         set_ton_rate, set_ton_rate_updated_at, get_ton_rate,
         update_internal_stars, get_internal_stars_pool, update_internal_stars_pool,
-        set_internal_stars_pool
+        set_internal_stars_pool, get_star_price, set_star_price
 )
     from fragment_api import load_fragment_token, authenticate_fragment, send_stars
     from yookassa import create_yookassa_payment, check_payment_status
@@ -74,31 +74,91 @@ def safe_edit_message_caption(bot, chat_id, message_id, new_caption, new_reply_m
         )
         return True
     except Exception as e:
-        if "message is not modified" in str(e):
+        error_text = str(e)
+        if "message is not modified" in error_text:
             # Игнорируем эту ошибку - сообщение уже имеет нужный контент
             logger.debug("Сообщение не требует изменений")
             return True
-        else:
-            # Пробрасываем другие ошибки
-            logger.error(f"Ошибка редактирования сообщения: {e}")
-            raise e
+        if "there is no caption" in error_text:
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=new_caption,
+                    reply_markup=new_reply_markup,
+                    parse_mode=parse_mode
+                )
+                return True
+            except Exception as text_error:
+                if "message is not modified" in str(text_error):
+                    logger.debug("Сообщение не требует изменений")
+                    return True
+                logger.error(f"Ошибка редактирования сообщения: {text_error}")
+                raise text_error
+        # Пробрасываем другие ошибки
+        logger.error(f"Ошибка редактирования сообщения: {e}")
+        raise e
+
+
+def get_referral_reward_settings():
+    amount_raw = get_setting('referral_reward_amount', REFERRAL_REWARD)
+    try:
+        amount = float(amount_raw)
+    except (TypeError, ValueError):
+        amount = float(REFERRAL_REWARD)
+    if amount <= 0:
+        amount = float(REFERRAL_REWARD)
+    currency = get_setting('referral_reward_currency', 'rub')
+    if currency not in ('rub', 'stars'):
+        currency = 'rub'
+    if currency == 'stars':
+        amount = int(amount)
+    return amount, currency
+
+
+def format_referral_reward(amount, currency):
+    if currency == 'stars':
+        amount_value = float(amount)
+        if amount_value.is_integer():
+            return f"{int(amount_value)} ⭐"
+        return f"{amount_value} ⭐"
+    return f"{float(amount):.2f} руб"
+
+
+def edit_message_with_fallback(chat_id, message_id, text, reply_markup=None, parse_mode=None):
+    try:
+        bot.edit_message_caption(
+            chat_id=chat_id,
+            message_id=message_id,
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode
+        )
+    except Exception as e:
+        if "message is not modified" in str(e):
+            return
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=parse_mode
+            )
+        except Exception as fallback_error:
+            logger.error(f"Ошибка редактирования сообщения: {fallback_error}")
 # --- Анимация загрузки ---
 def animate_caption(bot, call):
     global animation_running
     dots = 1
     while animation_running:
         caption = "🔄 Отправляю звезды" + "." * dots
-        try:
-            bot.edit_message_caption(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                caption=caption,
-                reply_markup=None
-            )
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                logger.warning(f"Ошибка при обновлении сообщения анимации: {e}")
-            break
+        edit_message_with_fallback(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=caption,
+            reply_markup=back_to_main_keyboard()
+        )
 
         dots = (dots % 3) + 1
         time.sleep(1)
@@ -129,21 +189,36 @@ def start_or_menu(message: Message):
 
     # Если пользователь НОВЫЙ И был реферер, начисляем награду
     if user_created and referrer_id is not None:
-        update_balance(referrer_id, REFERRAL_REWARD)
-        add_transaction(
-            user_id=referrer_id,
-            amount=REFERRAL_REWARD,
-            transaction_type='referral_reward',
-            status='completed',
-            target_user=str(user.id)
-        )
+        reward_amount, reward_currency = get_referral_reward_settings()
+        reward_text = format_referral_reward(reward_amount, reward_currency)
+        if reward_currency == 'stars':
+            reward_stars = int(reward_amount)
+            if reward_stars > 0:
+                update_internal_stars(referrer_id, reward_stars)
+                add_transaction(
+                    user_id=referrer_id,
+                    amount=reward_stars,
+                    transaction_type='referral_reward_internal',
+                    status='completed',
+                    target_user=str(user.id)
+                )
+        else:
+            update_balance(referrer_id, reward_amount)
+            add_transaction(
+                user_id=referrer_id,
+                amount=reward_amount,
+                transaction_type='referral_reward',
+                status='completed',
+                target_user=str(user.id)
+            )
         # Уведомляем реферера
         try:
             bot.send_message(
                 referrer_id,
                 f"✅ Награда за реферала!\n\n"
-                f"Пользователь @{username or user.id} зарегистрировался по вашей ссылке. На ваш баланс зачислено **{REFERRAL_REWARD} руб**!",
-                parse_mode='Markdown'
+                f"Пользователь @{username or user.id} зарегистрировался по вашей ссылке. На ваш баланс зачислено **{reward_text}**!",
+                parse_mode='Markdown',
+                reply_markup=back_to_main_keyboard()
             )
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление рефереру {referrer_id}: {e}")
@@ -154,7 +229,7 @@ def start_or_menu(message: Message):
         message.chat.id,
         MAIN_MENU_IMAGE,
         caption=WELCOME_MES,
-        reply_markup=main_menu_keyboard()
+        reply_markup=main_menu_keyboard(user.id)
     )
 
 @bot.message_handler(commands=['export'])
@@ -164,12 +239,12 @@ def handle_export_command(message: Message):
 
     # Проверяем, что команду вызвал админ
     if str(user_id) != ADMIN_ID:
-        bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.")
+        bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.", reply_markup=back_to_main_keyboard())
         return
 
     try:
         # Отправляем сообщение о начале процесса
-        processing_msg = bot.reply_to(message, "🔄 Начинаю экспорт базы данных в Excel...")
+        processing_msg = bot.reply_to(message, "🔄 Начинаю экспорт базы данных в Excel...", reply_markup=back_to_main_keyboard())
 
         # Выполняем экспорт
         filename = export_database_to_excel()
@@ -181,7 +256,8 @@ def handle_export_command(message: Message):
                     chat_id=message.chat.id,
                     document=file,
                     caption=f"📊 Экспорт базы данных завершен\nФайл: {filename}",
-                    reply_to_message_id=message.message_id
+                    reply_to_message_id=message.message_id,
+                    reply_markup=back_to_main_keyboard()
                 )
 
             # УДАЛЯЕМ файл после успешной отправки
@@ -198,7 +274,8 @@ def handle_export_command(message: Message):
             bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=processing_msg.message_id,
-                text="❌ Не удалось создать файл экспорта."
+                text="❌ Не удалось создать файл экспорта.",
+                reply_markup=back_to_main_keyboard()
             )
 
     except Exception as e:
@@ -212,7 +289,7 @@ def handle_export_command(message: Message):
         except Exception as delete_error:
             logger.error(f"❌ Ошибка удаления файла после ошибки отправки: {delete_error}")
 
-        bot.reply_to(message, f"❌ Произошла ошибка при экспорте: {e}")
+        bot.reply_to(message, f"❌ Произошла ошибка при экспорте: {e}", reply_markup=back_to_main_keyboard())
 
 
 @bot.message_handler(commands=['stats'])
@@ -222,7 +299,7 @@ def handle_stats_command(message: Message):
 
     # Проверяем, что команду вызвал админ
     if str(user_id) != ADMIN_ID:
-        bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.")
+        bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.", reply_markup=back_to_main_keyboard())
         return
 
     try:
@@ -278,19 +355,19 @@ def handle_stats_command(message: Message):
             f"• Обновлен: {last_rate_update[:16] if last_rate_update != 'N/A' else 'N/A'}"
         )
 
-        bot.reply_to(message, stats_message, parse_mode='Markdown')
+        bot.reply_to(message, stats_message, parse_mode='Markdown', reply_markup=back_to_main_keyboard())
 
     except Exception as e:
         logger.error(f"Ошибка при выполнении команды /stats: {e}")
-        bot.reply_to(message, f"❌ Ошибка получения статистики: {e}")
+        bot.reply_to(message, f"❌ Ошибка получения статистики: {e}", reply_markup=back_to_main_keyboard())
 
 # --- Обработчики колбэков (Меню и Профиль) ---
 @bot.callback_query_handler(func=lambda call: call.data == 'buy_stars')
 def buy_stars_selection_menu(call: CallbackQuery):
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="Выберите, кому вы хотите купить звёзды:",
+        text="Выберите, кому вы хотите купить звёзды:",
         reply_markup=buy_stars_options_keyboard()
     )
 
@@ -299,12 +376,12 @@ def buy_stars_selection_menu(call: CallbackQuery):
 def buy_internal_stars_menu(call: CallbackQuery):
     user_id = call.from_user.id
     pool = get_internal_stars_pool()
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="⭐ Покупка внутренних звезд (1 внутренняя ⭐ = 1 Telegram ⭐)\n\n"
-                "💳 Оплата списывается Telegram Stars\n"
-                f"🏦 В админке: {pool} ⭐",
+        text="⭐ Покупка внутренних звезд (1 внутренняя ⭐ = 1 Telegram ⭐)\n\n"
+             "💳 Оплата списывается Telegram Stars\n"
+            #  f"🏦 В админке: {pool} ⭐",
         reply_markup=buy_internal_stars_quantity_keyboard()
     )
 
@@ -328,11 +405,11 @@ def deposit_keyboard(user_data):
 def deposit_menu(call: CallbackQuery):
     user_id = call.from_user.id
     user_data = get_user(user_id)
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="💳 Выберите способ пополнения и сумму:\n\n"
-                f"💰 Текущий баланс: {user_data['balance']:.2f} руб",
+        text="💳 Выберите способ пополнения и сумму:\n\n"
+             f"💰 Текущий баланс: {user_data['balance']:.2f} руб",
         reply_markup=deposit_keyboard(user_data)
     )
 
@@ -341,14 +418,14 @@ def deposit_menu(call: CallbackQuery):
 def show_profile(call: CallbackQuery):
     user_id = call.from_user.id
     user_data = get_user(user_id)
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption=f"👤 Ваш профиль:\n\n"
-                f"🆔 ID: {user_data['user_id']}\n"
-                f"👤 Username: @{user_data['username'] or 'Не указан'}\n"
-                f"💰 Баланс: {user_data['balance']:.2f} руб\n"
-                f"⭐ Внутренние звезды: {user_data.get('internal_stars', 0)}\n",
+        text=f"👤 Ваш профиль:\n\n"
+             f"🆔 ID: {user_data['user_id']}\n"
+             f"👤 Username: @{user_data['username'] or 'Не указан'}\n"
+             f"💰 Баланс: {user_data['balance']:.2f} руб\n"
+             f"⭐ Внутренние звезды: {user_data.get('internal_stars', 0)}\n",
         reply_markup=back_to_main_keyboard()
     )
 
@@ -368,19 +445,22 @@ def show_referrals_menu(call: CallbackQuery):
     referral_keyboard = InlineKeyboardMarkup()
     referral_keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='main_menu'))
 
+    reward_amount, reward_currency = get_referral_reward_settings()
+    reward_text = format_referral_reward(reward_amount, reward_currency)
+    reward_target = "на баланс" if reward_currency == 'rub' else "на баланс внутренних звезд"
     caption = (
         f"🔗 **Реферальная программа**\n\n"
         f"Приглашайте друзей и получайте вознаграждение!\n"
-        f"🎁 За каждого приглашенного пользователя, который запустит бота, вы получаете **{REFERRAL_REWARD} руб** на баланс.\n\n"
+        f"🎁 За каждого приглашенного пользователя, который запустит бота, вы получаете **{reward_text}** {reward_target}.\n\n"
         f"👤 Количество ваших рефералов: **{referral_count}**\n\n"
         f"**Ваша реферальная ссылка:**\n"
         f"`{referral_link}`"
     )
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption=caption,
+        text=caption,
         reply_markup=referral_keyboard,
         parse_mode='Markdown'
     )
@@ -388,11 +468,11 @@ def show_referrals_menu(call: CallbackQuery):
 @bot.callback_query_handler(func=lambda call: call.data == 'main_menu')
 def main_menu_callback(call: CallbackQuery):
     delete_session_data(call.from_user.id)  # Очищаем сессию при возврате в меню
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption=WELCOME_MES,
-        reply_markup=main_menu_keyboard()
+        text=WELCOME_MES,
+        reply_markup=main_menu_keyboard(call.from_user.id)
     )
 
 
@@ -416,12 +496,309 @@ def calculator_result_keyboard():
     return keyboard
 
 
-@bot.callback_query_handler(func=lambda call: call.data == 'calculator')
-def show_calculator_menu(call: CallbackQuery):
-    bot.edit_message_caption(
+def admin_menu_keyboard():
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(InlineKeyboardButton("🎁 Реферальная программа", callback_data='admin_referral_settings'))
+    keyboard.row(InlineKeyboardButton("⭐ Цена Telegram Stars", callback_data='admin_star_price'))
+    keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
+    return keyboard
+
+
+def admin_referral_settings_keyboard(active_currency):
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(InlineKeyboardButton("✏️ Изменить размер", callback_data='admin_referral_amount'))
+    if active_currency == 'rub':
+        keyboard.row(InlineKeyboardButton("✅ Начислять в рублях", callback_data='admin_referral_currency_rub'))
+        keyboard.row(InlineKeyboardButton("⭐ Начислять внутренними звездами", callback_data='admin_referral_currency_stars'))
+    else:
+        keyboard.row(InlineKeyboardButton("💰 Начислять в рублях", callback_data='admin_referral_currency_rub'))
+        keyboard.row(InlineKeyboardButton("✅ Начислять внутренними звездами", callback_data='admin_referral_currency_stars'))
+    keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='admin_menu'))
+    keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
+    return keyboard
+
+
+def admin_referral_amount_keyboard():
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='admin_referral_settings'))
+    keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
+    return keyboard
+
+
+def admin_star_price_keyboard():
+    keyboard = InlineKeyboardMarkup()
+    keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='admin_menu'))
+    keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
+    return keyboard
+
+
+@bot.message_handler(commands=['admin'])
+def handle_admin_command(message: Message):
+    user_id = message.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.reply_to(message, "❌ У вас нет прав для выполнения этой команды.", reply_markup=back_to_main_keyboard())
+        return
+    bot.send_message(
+        message.chat.id,
+        "⚙️ Админка\n\nВыберите раздел:",
+        reply_markup=admin_menu_keyboard()
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_menu')
+def show_admin_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Доступно только администратору.", show_alert=True)
+        return
+    text = "⚙️ Админка\n\nВыберите раздел:"
+    if getattr(call.message, 'photo', None):
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=text,
+            reply_markup=admin_menu_keyboard()
+        )
+    else:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=admin_menu_keyboard()
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_referral_settings')
+def show_admin_referral_settings(call: CallbackQuery):
+    user_id = call.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Доступно только администратору.", show_alert=True)
+        return
+    reward_amount, reward_currency = get_referral_reward_settings()
+    reward_text = format_referral_reward(reward_amount, reward_currency)
+    reward_target = "на баланс" if reward_currency == 'rub' else "на баланс внутренних звезд"
+    text = (
+        "🎁 Реферальная программа\n\n"
+        f"Текущая награда: **{reward_text}** {reward_target}\n\n"
+        "Что хотите изменить?"
+    )
+    keyboard = admin_referral_settings_keyboard(reward_currency)
+    if getattr(call.message, 'photo', None):
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    else:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_referral_amount')
+def prompt_admin_referral_amount(call: CallbackQuery):
+    user_id = call.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Доступно только администратору.", show_alert=True)
+        return
+    reward_amount, reward_currency = get_referral_reward_settings()
+    reward_text = format_referral_reward(reward_amount, reward_currency)
+    reward_target = "в рублях" if reward_currency == 'rub' else "во внутренних звездах"
+    session_data = {
+        'state': 'admin_referral_amount',
+        'message_id': call.message.message_id
+    }
+    set_session_data(user_id, session_data)
+    text = (
+        "✏️ Изменение награды за реферала\n\n"
+        f"Текущая награда: **{reward_text}**\n"
+        f"Введите новую сумму ({reward_target}):"
+    )
+    if getattr(call.message, 'photo', None):
+        bot.edit_message_caption(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            caption=text,
+            reply_markup=admin_referral_amount_keyboard(),
+            parse_mode='Markdown'
+        )
+    else:
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=text,
+            reply_markup=admin_referral_amount_keyboard(),
+            parse_mode='Markdown'
+        )
+    bot.register_next_step_handler(call.message, process_admin_referral_amount)
+
+
+def process_admin_referral_amount(message: Message):
+    user_id = message.from_user.id
+    amount_input = message.text.strip().replace(',', '.')
+
+    state_data = get_session_data(user_id)
+    target_message_id = state_data.get('message_id')
+
+    if state_data.get('state') != 'admin_referral_amount' or not target_message_id:
+        return
+
+    try:
+        if message.message_id != target_message_id:
+            bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    reward_amount, reward_currency = get_referral_reward_settings()
+    reward_target = "в рублях" if reward_currency == 'rub' else "во внутренних звездах"
+
+    try:
+        amount = float(amount_input)
+        if amount <= 0:
+            raise ValueError
+        if reward_currency == 'stars' and not amount.is_integer():
+            raise ValueError
+    except ValueError:
+        text = (
+            "❌ Некорректная сумма. "
+            f"Введите число больше 0 ({reward_target})."
+        )
+        edit_message_with_fallback(
+            chat_id=message.chat.id,
+            message_id=target_message_id,
+            text=text,
+            reply_markup=admin_referral_amount_keyboard()
+        )
+        bot.register_next_step_handler(message, process_admin_referral_amount)
+        return
+
+    if reward_currency == 'stars':
+        amount = int(amount)
+
+    set_setting('referral_reward_amount', amount)
+    delete_session_data(user_id)
+
+    reward_text = format_referral_reward(amount, reward_currency)
+    reward_target = "на баланс" if reward_currency == 'rub' else "на баланс внутренних звезд"
+    text = (
+        "✅ Награда обновлена!\n\n"
+        f"Теперь за реферала начисляется **{reward_text}** {reward_target}."
+    )
+    edit_message_with_fallback(
+        chat_id=message.chat.id,
+        message_id=target_message_id,
+        text=text,
+        reply_markup=admin_referral_settings_keyboard(reward_currency),
+        parse_mode='Markdown'
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data in ('admin_referral_currency_rub', 'admin_referral_currency_stars'))
+def update_admin_referral_currency(call: CallbackQuery):
+    user_id = call.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Доступно только администратору.", show_alert=True)
+        return
+    new_currency = 'rub' if call.data.endswith('rub') else 'stars'
+    set_setting('referral_reward_currency', new_currency)
+    if new_currency == 'stars':
+        amount_raw = get_setting('referral_reward_amount', REFERRAL_REWARD)
+        try:
+            amount_value = float(amount_raw)
+        except (TypeError, ValueError):
+            amount_value = float(REFERRAL_REWARD)
+        if not amount_value.is_integer():
+            bot.answer_callback_query(
+                call.id,
+                "⚠️ Для начисления звездами нужна целая сумма. Задайте размер.",
+                show_alert=True
+            )
+    show_admin_referral_settings(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_star_price')
+def prompt_admin_star_price(call: CallbackQuery):
+    user_id = call.from_user.id
+    if str(user_id) != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Доступно только администратору.", show_alert=True)
+        return
+    star_price = get_star_price()
+    session_data = {
+        'state': 'admin_star_price',
+        'message_id': call.message.message_id
+    }
+    set_session_data(user_id, session_data)
+    text = (
+        "⭐ Цена Telegram Stars\n\n"
+        f"Текущая цена: **{star_price:.2f} руб**\n"
+        "Введите новую цену за 1 ⭐:"
+    )
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="🧮 Калькулятор\n\nВыберите, что нужно посчитать:",
+        text=text,
+        reply_markup=admin_star_price_keyboard(),
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler(call.message, process_admin_star_price)
+
+
+def process_admin_star_price(message: Message):
+    user_id = message.from_user.id
+    amount_input = message.text.strip().replace(',', '.')
+
+    state_data = get_session_data(user_id)
+    target_message_id = state_data.get('message_id')
+
+    if state_data.get('state') != 'admin_star_price' or not target_message_id:
+        return
+
+    try:
+        if message.message_id != target_message_id:
+            bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    try:
+        amount = float(amount_input)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        text = "❌ Некорректная цена. Введите число больше 0:"
+        edit_message_with_fallback(
+            chat_id=message.chat.id,
+            message_id=target_message_id,
+            text=text,
+            reply_markup=admin_star_price_keyboard()
+        )
+        bot.register_next_step_handler(message, process_admin_star_price)
+        return
+
+    set_star_price(amount)
+    delete_session_data(user_id)
+
+    text = f"✅ Цена обновлена! Теперь 1 ⭐ = **{amount:.2f} руб**."
+    edit_message_with_fallback(
+        chat_id=message.chat.id,
+        message_id=target_message_id,
+        text=text,
+        reply_markup=admin_menu_keyboard(),
+        parse_mode='Markdown'
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'calculator')
+def show_calculator_menu(call: CallbackQuery):
+    edit_message_with_fallback(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="🧮 Калькулятор\n\nВыберите, что нужно посчитать:",
         reply_markup=calculator_menu_keyboard()
     )
 
@@ -448,10 +825,10 @@ def handle_calculator_choice(call: CallbackQuery):
     }
     set_session_data(user_id, session_data)
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption=f"🧮 Калькулятор\n\n{prompt}",
+        text=f"🧮 Калькулятор\n\n{prompt}",
         reply_markup=back_to_main_keyboard()
     )
     bot.register_next_step_handler(call.message, process_calculator_amount)
@@ -479,10 +856,10 @@ def process_calculator_amount(message: Message):
         if amount <= 0:
             raise ValueError
     except ValueError:
-        bot.edit_message_caption(
+        edit_message_with_fallback(
             chat_id=message.chat.id,
             message_id=target_message_id,
-            caption="❌ Некорректное значение. Введите число больше 0:",
+            text="❌ Некорректное значение. Введите число больше 0:",
             reply_markup=back_to_main_keyboard()
         )
         bot.register_next_step_handler(message, process_calculator_amount)
@@ -492,29 +869,30 @@ def process_calculator_amount(message: Message):
     if calc_type in ('calc_ton_to_rub', 'calc_rub_to_ton', 'calc_ton_to_stars', 'calc_stars_to_ton'):
         ton_rate = get_ton_rub_rate()
         if not ton_rate:
-            bot.edit_message_caption(
+            edit_message_with_fallback(
                 chat_id=message.chat.id,
                 message_id=target_message_id,
-                caption="❌ Курс TON сейчас недоступен. Попробуйте позже.",
+                text="❌ Курс TON сейчас недоступен. Попробуйте позже.",
                 reply_markup=calculator_result_keyboard()
             )
             delete_session_data(user_id)
             return
 
+    star_price = get_star_price()
     if calc_type == 'calc_rub_to_stars':
-        stars = amount / STAR_PRICE
+        stars = amount / star_price
         caption = (
             "🧮 Рубли → ⭐\n\n"
             f"Сумма: {amount:.2f} руб\n"
-            f"Цена звезды: {STAR_PRICE:.2f} руб\n\n"
+            f"Цена звезды: {star_price:.2f} руб\n\n"
             f"Получите: ~{stars:.2f} ⭐"
         )
     elif calc_type == 'calc_stars_to_rub':
-        rub = amount * STAR_PRICE
+        rub = amount * star_price
         caption = (
             "🧮 ⭐ → Рубли\n\n"
             f"Количество звезд: {amount:.2f} ⭐\n"
-            f"Цена звезды: {STAR_PRICE:.2f} руб\n\n"
+            f"Цена звезды: {star_price:.2f} руб\n\n"
             f"Нужно заплатить: {rub:.2f} руб"
         )
     elif calc_type == 'calc_ton_to_rub':
@@ -534,30 +912,30 @@ def process_calculator_amount(message: Message):
             f"Нужно отправить: {ton:.6f} TON"
         )
     elif calc_type == 'calc_ton_to_stars':
-        stars = (amount * ton_rate) / STAR_PRICE
+        stars = (amount * ton_rate) / star_price
         caption = (
             "🧮 TON → ⭐\n\n"
             f"Сумма: {amount:.6f} TON\n"
             f"Курс: 1 TON ≈ {ton_rate:.2f} руб\n"
-            f"Цена звезды: {STAR_PRICE:.2f} руб\n\n"
+            f"Цена звезды: {star_price:.2f} руб\n\n"
             f"Получите: ~{stars:.2f} ⭐"
         )
     elif calc_type == 'calc_stars_to_ton':
-        ton = (amount * STAR_PRICE) / ton_rate
+        ton = (amount * star_price) / ton_rate
         caption = (
             "🧮 ⭐ → TON\n\n"
             f"Количество звезд: {amount:.2f} ⭐\n"
-            f"Цена звезды: {STAR_PRICE:.2f} руб\n"
+            f"Цена звезды: {star_price:.2f} руб\n"
             f"Курс: 1 TON ≈ {ton_rate:.2f} руб\n\n"
             f"Нужно отправить: {ton:.6f} TON"
         )
     else:
         caption = "❌ Неизвестный тип расчета."
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=message.chat.id,
         message_id=target_message_id,
-        caption=caption,
+        text=caption,
         reply_markup=calculator_result_keyboard()
     )
     delete_session_data(user_id)
@@ -577,11 +955,11 @@ def buy_stars_self(call: CallbackQuery):
     }
     set_session_data(user_id, session_data)
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="🎯 Выберите количество звезд для покупки:\n\n"
-                f"💰 Ваш баланс: {user_data['balance']:.2f} руб",
+        text="🎯 Выберите количество звезд для покупки:\n\n"
+             f"💰 Ваш баланс: {user_data['balance']:.2f} руб",
         reply_markup=buy_stars_quantity_keyboard(user_data)
     )
 
@@ -598,10 +976,10 @@ def buy_stars_friend(call: CallbackQuery):
     }
     set_session_data(user_id, session_data)
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="Пожалуйста, введите @username друга (без @):",
+        text="Пожалуйста, введите @username друга (без @):",
         reply_markup=back_to_main_keyboard()
     )
     bot.register_next_step_handler(call.message, process_friend_username)
@@ -627,10 +1005,10 @@ def process_friend_username(message: Message):
         logger.error(f"Не удалось удалить сообщение: {e}")
 
     if not username_input:
-        bot.edit_message_caption(
+        edit_message_with_fallback(
             chat_id=message.chat.id,
             message_id=target_message_id,
-            caption="❌ Некорректный username. Попробуйте еще раз:",
+            text="❌ Некорректный username. Попробуйте еще раз:",
             reply_markup=back_to_main_keyboard()
         )
         bot.register_next_step_handler(message, process_friend_username)
@@ -649,34 +1027,50 @@ def process_friend_username(message: Message):
     # ИСПРАВЛЕНИЕ: Экранируем username для корректного отображения в Markdown
     escaped_username = username_input.replace('_', r'\_').replace('*', r'\*').replace('`', r'\`')
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=message.chat.id,
         message_id=target_message_id,
-        caption=f"Вы будете покупать звёзды для пользователя **@{escaped_username}**. Выберите количество:",
+        text=f"Вы будете покупать звёзды для пользователя **@{escaped_username}**. Выберите количество:",
         reply_markup=buy_stars_quantity_keyboard(user_data),
         parse_mode='Markdown'
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_') and not call.data.startswith('buy_internal_'))
-def handle_star_purchase(call: CallbackQuery):
-    stars = int(call.data.split('_')[1])
+def execute_star_purchase(call, stars):
     user_id = call.from_user.id
     user_data = get_user(user_id)
-    cost = stars * STAR_PRICE
+    star_price = get_star_price()
+    cost = stars * star_price
 
     # Получаем целевой username из БД
     session_data = get_session_data(user_id)
     target_username = session_data.get('target_username')
 
     if not target_username:
-        bot.answer_callback_query(call.id, "❌ Не удалось определить получателя. Пожалуйста, начните заново.",
-                                  show_alert=True)
-        main_menu_callback(call)
+        if getattr(call, 'id', None):
+            bot.answer_callback_query(
+                call.id,
+                "❌ Не удалось определить получателя. Пожалуйста, начните заново.",
+                show_alert=True
+            )
+        edit_message_with_fallback(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text="❌ Не удалось определить получателя. Начните заново.",
+            reply_markup=back_to_main_keyboard()
+        )
         return
 
     if user_data['balance'] < cost:
-        bot.answer_callback_query(call.id, f"❌ Недостаточно средств на балансе. Нужно {cost:.2f} руб.", show_alert=True)
+        if getattr(call, 'id', None):
+            bot.answer_callback_query(call.id, f"❌ Недостаточно средств. Нужно {cost:.2f} руб.", show_alert=True)
+        else:
+            edit_message_with_fallback(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                text=f"❌ Недостаточно средств. Нужно {cost:.2f} руб.",
+                reply_markup=back_to_main_keyboard()
+            )
         return
 
     # Запуск анимации
@@ -689,10 +1083,10 @@ def handle_star_purchase(call: CallbackQuery):
         token = load_fragment_token() or authenticate_fragment()
         if not token:
             animation_running = False
-            bot.edit_message_caption(
+            edit_message_with_fallback(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                caption="❌ Ошибка системы. Не удалось получить токен Fragment API. Попробуйте позже.",
+                text="❌ Ошибка системы. Не удалось получить токен Fragment API. Попробуйте позже.",
                 reply_markup=back_to_main_keyboard()
             )
             return
@@ -707,11 +1101,11 @@ def handle_star_purchase(call: CallbackQuery):
             add_transaction(user_data['user_id'], stars, 'stars_purchase', target_user=target_username)
             user_data_new = get_user(user_id)
 
-            bot.edit_message_caption(
+            edit_message_with_fallback(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                caption=f"✅ Успешно отправлено {stars} звезд пользователю **@{target_username}**!\n"
-                        f"💰 Ваш новый баланс: {user_data_new['balance']:.2f} руб",
+                text=f"✅ Успешно отправлено {stars} звезд пользователю **@{target_username}**!\n"
+                     f"💰 Ваш новый баланс: {user_data_new['balance']:.2f} руб",
                 reply_markup=back_to_main_keyboard(),
                 parse_mode='Markdown'
             )
@@ -721,15 +1115,87 @@ def handle_star_purchase(call: CallbackQuery):
             else:
                 error_message = f"❌ Ошибка при отправке: {message}"
 
-            bot.edit_message_caption(
+            edit_message_with_fallback(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                caption=error_message,
+                text=error_message,
                 reply_markup=back_to_main_keyboard()
             )
     finally:
         # Очищаем состояние после завершения
         delete_session_data(user_id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == 'buy_custom')
+def prompt_custom_stars_amount(call: CallbackQuery):
+    user_id = call.from_user.id
+    session_data = get_session_data(user_id)
+    if not session_data.get('target_username'):
+        bot.answer_callback_query(call.id, "❌ Не удалось определить получателя. Начните заново.", show_alert=True)
+        main_menu_callback(call)
+        return
+
+    session_data.update({
+        'state': 'buy_custom_stars',
+        'message_id': call.message.message_id
+    })
+    set_session_data(user_id, session_data)
+
+    edit_message_with_fallback(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="Введите количество звезд (от 1 до 10000):",
+        reply_markup=back_to_main_keyboard()
+    )
+    bot.register_next_step_handler(call.message, process_custom_stars_amount)
+
+
+def process_custom_stars_amount(message: Message):
+    user_id = message.from_user.id
+    amount_input = message.text.strip()
+
+    state_data = get_session_data(user_id)
+    target_message_id = state_data.get('message_id')
+
+    if state_data.get('state') != 'buy_custom_stars' or not target_message_id:
+        return
+
+    try:
+        if message.message_id != target_message_id:
+            bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    try:
+        stars = int(amount_input)
+        if stars < 1 or stars > 10000:
+            raise ValueError
+    except ValueError:
+        edit_message_with_fallback(
+            chat_id=message.chat.id,
+            message_id=target_message_id,
+            text="❌ Некорректное количество. Введите число от 1 до 10000:",
+            reply_markup=back_to_main_keyboard()
+        )
+        bot.register_next_step_handler(message, process_custom_stars_amount)
+        return
+
+    call_mock = type('MockCall', (object,), {
+        'id': None,
+        'from_user': message.from_user,
+        'message': type('MockMessage', (object,), {
+            'chat': type('MockChat', (object,), {'id': message.chat.id})(),
+            'message_id': target_message_id
+        })()
+    })()
+
+    execute_star_purchase(call_mock, stars)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_') and not call.data.startswith('buy_internal_'))
+def handle_star_purchase(call: CallbackQuery):
+    stars = int(call.data.split('_')[1])
+    execute_star_purchase(call, stars)
 
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
@@ -776,11 +1242,82 @@ def handle_successful_payment(message: Message):
         "✅ Оплата Telegram Stars успешна!\n\n"
         f"⭐ Получено: {stars}\n"
         f"⭐ Ваши внутренние звезды: {user_data_new.get('internal_stars', 0)}\n"
-        f"🏦 В админке: {pool_new} ⭐"
+        # f"🏦 В админке: {pool_new} ⭐",
+        reply_markup=back_to_main_keyboard()
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_internal_'))
+@bot.callback_query_handler(func=lambda call: call.data == 'buy_internal_custom')
+def prompt_custom_internal_stars(call: CallbackQuery):
+    user_id = call.from_user.id
+    session_data = {
+        'state': 'buy_custom_internal_stars',
+        'message_id': call.message.message_id
+    }
+    set_session_data(user_id, session_data)
+    edit_message_with_fallback(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        text="Введите количество внутренних звезд (от 1 до 10000):",
+        reply_markup=back_to_main_keyboard()
+    )
+    bot.register_next_step_handler(call.message, process_custom_internal_stars_amount)
+
+
+def process_custom_internal_stars_amount(message: Message):
+    user_id = message.from_user.id
+    amount_input = message.text.strip()
+
+    state_data = get_session_data(user_id)
+    target_message_id = state_data.get('message_id')
+
+    if state_data.get('state') != 'buy_custom_internal_stars' or not target_message_id:
+        return
+
+    try:
+        if message.message_id != target_message_id:
+            bot.delete_message(message.chat.id, message.message_id)
+    except Exception as e:
+        logger.error(f"Не удалось удалить сообщение: {e}")
+
+    try:
+        stars = int(amount_input)
+        if stars < 1 or stars > 10000:
+            raise ValueError
+    except ValueError:
+        edit_message_with_fallback(
+            chat_id=message.chat.id,
+            message_id=target_message_id,
+            text="❌ Некорректное количество. Введите число от 1 до 10000:",
+            reply_markup=back_to_main_keyboard()
+        )
+        bot.register_next_step_handler(message, process_custom_internal_stars_amount)
+        return
+
+    delete_session_data(user_id)
+
+    payload = f"internal_stars:{user_id}:{stars}"
+    prices = [LabeledPrice(label=f"{stars} Telegram Stars", amount=stars)]
+
+    bot.send_invoice(
+        message.chat.id,
+        title="Покупка внутренних звезд",
+        description=f"Оплата {stars} Telegram Stars за {stars} внутренних ⭐",
+        invoice_payload=payload,
+        provider_token="",
+        currency="XTR",
+        prices=prices
+    )
+
+    edit_message_with_fallback(
+        chat_id=message.chat.id,
+        message_id=target_message_id,
+        text="✅ Счет на оплату отправлен. Проверьте сообщение с оплатой.",
+        reply_markup=back_to_main_keyboard()
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('buy_internal_') and call.data != 'buy_internal_custom')
 def handle_internal_star_purchase(call: CallbackQuery):
     stars = int(call.data.split('_')[2])
     user_id = call.from_user.id
@@ -835,11 +1372,12 @@ def handle_ton_deposit(call: CallbackQuery):
     keyboard = InlineKeyboardMarkup()
     keyboard.row(InlineKeyboardButton("↗️ Оплатить в TON", url=payment_url))
     keyboard.row(InlineKeyboardButton("↩️ Назад", callback_data='deposit'))
+    keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption=caption,
+        text=caption,
         reply_markup=keyboard,
         parse_mode='Markdown'
     )
@@ -886,7 +1424,8 @@ def send_admin_deposit_notification(user, amount_rub, deposit_type, status, ton_
         bot.send_message(
             admin_id,
             message,
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=back_to_main_keyboard()
         )
         logger.info(f"Уведомление отправлено администратору {admin_id} о пополнении пользователя {user.id}")
 
@@ -905,10 +1444,10 @@ def handle_custom_deposit(call: CallbackQuery):
     }
     set_session_data(user_id, session_data)
 
-    bot.edit_message_caption(
+    edit_message_with_fallback(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        caption="💰 На какую сумму хотите пополнить?",
+        text="💰 На какую сумму хотите пополнить?",
         reply_markup=back_to_main_keyboard()
     )
     bot.register_next_step_handler(call.message, process_custom_deposit_amount)
@@ -939,16 +1478,20 @@ def process_custom_deposit_amount(message: Message):
             raise ValueError
     except ValueError:
         if target_message_id:
-            bot.edit_message_caption(
+            edit_message_with_fallback(
                 chat_id=message.chat.id,
                 message_id=target_message_id,
-                caption="❌ Некорректная сумма. Пожалуйста, введите число больше 0:",
+                text="❌ Некорректная сумма. Пожалуйста, введите число больше 0:",
                 reply_markup=back_to_main_keyboard()
             )
             bot.register_next_step_handler(message, process_custom_deposit_amount)
             return
         else:
-            bot.send_message(message.chat.id, "❌ Некорректная сумма. Пожалуйста, начните заново.")
+            bot.send_message(
+                message.chat.id,
+                "❌ Некорректная сумма. Пожалуйста, начните заново.",
+                reply_markup=back_to_main_keyboard()
+            )
             return
 
     # --- ИСПРАВЛЕНИЕ БАГА: Создание объекта-заглушки (MockCall) вместо CallbackQuery ---
@@ -975,6 +1518,7 @@ def process_deposit(call, amount: float, deposit_type='yookassa'):
     if payment_url:
         keyboard = InlineKeyboardMarkup()
         keyboard.row(InlineKeyboardButton("✅ Я оплатил", callback_data='check_payment'))
+        keyboard.row(InlineKeyboardButton("↩️ Главное меню", callback_data='main_menu'))
 
         safe_edit_message_caption(
             bot,
@@ -1030,12 +1574,12 @@ def handle_check_payment(call: CallbackQuery):
         # Отправляем уведомление администратору об успешном пополнении
         send_admin_deposit_notification(call.from_user, amount, 'yookassa', 'completed')
 
-        bot.edit_message_caption(
+        edit_message_with_fallback(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            caption=f"✅ Платеж успешно завершен!\n"
-                    f"💳 Сумма: **{amount:.2f} руб**\n"
-                    f"💰 Новый баланс: **{user_data['balance']:.2f} руб**",
+            text=f"✅ Платеж успешно завершен!\n"
+                 f"💳 Сумма: **{amount:.2f} руб**\n"
+                 f"💰 Новый баланс: **{user_data['balance']:.2f} руб**",
             reply_markup=back_to_main_keyboard(),
             parse_mode='Markdown'
         )
@@ -1118,7 +1662,11 @@ async def update_ton_rate_periodically():
                 set_ton_rate(fresh_rate)
                 set_ton_rate_updated_at(datetime.now().isoformat())
                 logger.info(f"🔄 Курс TON обновлен в фоне: {fresh_rate:.2f} RUB")
-                bot.send_message(ADMIN_ID, f"🔄 Курс TON обновлен: {fresh_rate:.2f} RUB")
+                bot.send_message(
+                    ADMIN_ID,
+                    f"🔄 Курс TON обновлен: {fresh_rate:.2f} RUB",
+                    reply_markup=back_to_main_keyboard()
+                )
             else:
                 logger.warning("❌ Не удалось обновить курс TON в фоновом режиме")
         except Exception as e:
@@ -1247,7 +1795,8 @@ async def check_deposits():
                             '✅ Депозит через TON подтвержден!\n'
                             f'Сумма: *+{ton_amount:.4f} TON* ({rub_amount:.2f} руб)\n'
                             f'Ваш новый баланс: {get_user(uid)["balance"]:.2f} руб',
-                            parse_mode='Markdown'
+                            parse_mode='Markdown',
+                            reply_markup=back_to_main_keyboard()
                         )
                     except Exception as e:
                         logger.error(f"Error sending message to user {uid}: {e}")
