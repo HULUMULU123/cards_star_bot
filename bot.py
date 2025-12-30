@@ -1662,11 +1662,6 @@ async def update_ton_rate_periodically():
                 set_ton_rate(fresh_rate)
                 set_ton_rate_updated_at(datetime.now().isoformat())
                 logger.info(f"🔄 Курс TON обновлен в фоне: {fresh_rate:.2f} RUB")
-                bot.send_message(
-                    ADMIN_ID,
-                    f"🔄 Курс TON обновлен: {fresh_rate:.2f} RUB",
-                    reply_markup=back_to_main_keyboard()
-                )
             else:
                 logger.warning("❌ Не удалось обновить курс TON в фоновом режиме")
         except Exception as e:
