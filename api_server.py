@@ -34,9 +34,9 @@ class AmountRequest(BaseModel):
 
 
 class WithdrawalRequest(BaseModel):
-    user_id: int
     amount: int
     username: str | None = None
+    user_id: int | None = None
     comment: str | None = None
 
 
