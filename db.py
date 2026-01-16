@@ -320,6 +320,20 @@ def set_star_price(value):
     set_setting('star_price', float(value))
 
 
+def get_usd_rub_rate():
+    """Получает текущий курс USD/RUB."""
+    value = get_setting('usd_rub_rate', None)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(config.USD_RUB_RATE)
+
+
+def set_usd_rub_rate(value):
+    """Сохраняет курс USD/RUB."""
+    set_setting('usd_rub_rate', float(value))
+
+
 def get_ton_rate():
     """Получает текущий курс TON из БД."""
     return get_setting('ton_rub_rate')

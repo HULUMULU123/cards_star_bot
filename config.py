@@ -14,7 +14,30 @@ logger = logging.getLogger(__name__)
 
 # --- Константы Бота ---
 STAR_PRICE = 1.5
-MAIN_MENU_IMAGE = "https://sociogramm.ru/assets/uploads/blogs/blog/kak-poluchit-zvezdy-v-telegram-1.jpeg"
+USD_RUB_RATE = float(os.getenv('USD_RUB_RATE', '90.0'))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+ROOT_IMG_DIR = os.path.join(PROJECT_ROOT, 'img')
+LOCAL_IMG_DIR = os.path.join(os.path.dirname(__file__), 'img')
+IMG_DIR = ROOT_IMG_DIR if os.path.isdir(ROOT_IMG_DIR) else LOCAL_IMG_DIR
+
+
+def resolve_image_path(value, default_name):
+    if value:
+        if value.startswith('http://') or value.startswith('https://'):
+            return value
+        if os.path.isabs(value):
+            return value
+        return os.path.join(IMG_DIR, value)
+    return os.path.join(IMG_DIR, default_name)
+
+
+MAIN_MENU_IMAGE = resolve_image_path(os.getenv('MAIN_MENU_IMAGE'), 'main_menu.jpg')
+BUY_STARS_IMAGE = resolve_image_path(os.getenv('BUY_STARS_IMAGE'), 'buy_stars.jpg')
+INTERNAL_STARS_IMAGE = resolve_image_path(os.getenv('INTERNAL_STARS_IMAGE'), 'buy_stars.jpg')
+PROFILE_IMAGE = resolve_image_path(os.getenv('PROFILE_IMAGE'), 'profile.jpg')
+DEPOSIT_IMAGE = resolve_image_path(os.getenv('DEPOSIT_IMAGE'), 'deposit.jpg')
+REFERRALS_IMAGE = resolve_image_path(os.getenv('REFERRALS_IMAGE'), 'referrals.jpg')
+CALCULATOR_IMAGE = resolve_image_path(os.getenv('CALCULATOR_IMAGE'), 'calculator.jpg')
 WELCOME_MES = f"Привет👋\n\nДобро пожаловать в бота для покупки Telegram Stars! 🌟\n\nВыберите действие:"
 TOKEN_FILE = "auth_token.json"
 MIN_STARS = 50
