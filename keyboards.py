@@ -21,9 +21,9 @@ def main_menu_keyboard(user_id=None):
     keyboard.row(
         InlineKeyboardButton("🧮 Калькулятор", callback_data='calculator')
     )
-    keyboard.row(
-        InlineKeyboardButton("🧪 +50 внутренних ⭐ (тест)", callback_data='grant_internal_50')
-    )
+    # keyboard.row(
+    #     InlineKeyboardButton("🧪 +50 внутренних ⭐ (тест)", callback_data='grant_internal_50')
+    # )
     if user_id and str(user_id) == str(config.ADMIN_ID):
         keyboard.row(InlineKeyboardButton("⚙️ Админка", callback_data='admin_menu'))
     return keyboard
