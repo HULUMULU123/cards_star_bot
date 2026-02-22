@@ -5,8 +5,10 @@ from pydantic import BaseModel
 import uvicorn
 
 from bot import bot
-from config import ADMIN_ID
+from config import ADMIN_ID, REFERRAL_REWARD
 from db import (
+    get_referral_count,
+    get_setting,
     get_internal_stars,
     get_internal_stars_pool,
     update_internal_stars,
@@ -29,6 +31,26 @@ def require_api_key(x_api_key: str = Header(None)):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
+def get_referral_reward_settings():
+    amount_raw = get_setting("referral_reward_amount", REFERRAL_REWARD)
+    try:
+        amount = float(amount_raw)
+    except (TypeError, ValueError):
+        amount = float(REFERRAL_REWARD)
+
+    if amount <= 0:
+        amount = float(REFERRAL_REWARD)
+
+    currency = get_setting("referral_reward_currency", "rub")
+    if currency not in ("rub", "stars"):
+        currency = "rub"
+
+    if currency == "stars":
+        amount = int(amount)
+
+    return amount, currency
+
+
 class AmountRequest(BaseModel):
     amount: int
 
@@ -48,6 +70,29 @@ def get_internal_stars_balance(_: None = Depends(require_api_key)):
 @app.get("/internal-stars/user/{user_id}")
 def get_internal_stars_user_balance(user_id: int, _: None = Depends(require_api_key)):
     return {"user_id": user_id, "balance": get_internal_stars(user_id)}
+
+
+@app.get("/referrals/user/{user_id}")
+def get_user_referral_info(user_id: int, _: None = Depends(require_api_key)):
+    try:
+        bot_username = bot.get_me().username
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"bot_username_unavailable:{e}")
+
+    referral_count = get_referral_count(user_id)
+    amount, currency = get_referral_reward_settings()
+    reward_target = "balance" if currency == "rub" else "internal_stars_balance"
+
+    return {
+        "user_id": user_id,
+        "referral_link": f"https://t.me/{bot_username}?start=r{user_id}",
+        "referral_count": referral_count,
+        "reward": {
+            "amount": amount,
+            "currency": currency,
+            "target": reward_target,
+        },
+    }
 
 
 @app.post("/internal-stars/user/{user_id}/credit")
